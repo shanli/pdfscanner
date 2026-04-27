@@ -49,3 +49,19 @@ def test_detect_topics_names(text_pdf):
     names = [t.name for t in topics]
     assert "Advertising" in names
     assert "Animal Rights" in names
+
+from pdfscanner.extractor import extract
+
+def test_extract_sentences(text_pdf):
+    doc = open_pdf(text_pdf)
+    topics = extract(doc, start_page=0, end_page=0)
+    doc.close()
+    ad = next(t for t in topics if t.name == "Advertising")
+    assert any("informs" in s for s in ad.sentences)
+
+def test_extract_topic_filter(text_pdf):
+    doc = open_pdf(text_pdf)
+    topics = extract(doc, start_page=0, end_page=0, topic_filter=["1"])
+    doc.close()
+    assert len(topics) == 1
+    assert topics[0].num == 1
