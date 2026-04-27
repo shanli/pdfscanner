@@ -93,14 +93,24 @@ def detect_topics(
     for page_idx in range(start_page, end_page + 1):
         page = doc[page_idx]
 
+        # Get page text — OCR or direct extraction
+        if force_ocr and ocr_fn:
+            page_text = "\n".join(ocr_fn(page))
+        else:
+            page_text = page.get_text()
+
         # Strategy 1: color-coded yellow rects (image-based or styled PDFs)
         color_rects = _color_topic_rects(page)
         if color_rects:
             merged = _merge_rects(color_rects)
             for m in merged:
-                clip = fitz.Rect(m[0] - 5, m[1], m[2] + 5, m[3])
-                words = page.get_text("words", clip=clip)
-                raw = " ".join(w[4] for w in words)
+                if force_ocr:
+                    # Image PDF: search full OCR text for topic pattern near this rect
+                    raw = page_text
+                else:
+                    clip = fitz.Rect(m[0] - 5, m[1], m[2] + 5, m[3])
+                    words = page.get_text("words", clip=clip)
+                    raw = " ".join(w[4] for w in words)
                 mo = re.search(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', raw)
                 if mo:
                     found.append((page_idx, m[1], int(mo.group(1)), mo.group(2)))
@@ -109,9 +119,8 @@ def detect_topics(
                 if mo2:
                     found.append((page_idx, m[1], int(mo2.group(1)), mo2.group(2).strip()))
 
-        # Strategy 2: regex on extracted text (text-based PDFs)
-        text = page.get_text()
-        for mo in _SECTION_RE.finditer(text):
+        # Strategy 2: regex on page text (text PDF or OCR output)
+        for mo in _SECTION_RE.finditer(page_text):
             if mo.group(1):   # "N. Title"
                 num, name = int(mo.group(1)), mo.group(2).strip()
             elif mo.group(3):  # 话题N
@@ -119,7 +128,7 @@ def detect_topics(
             else:              # Chapter N
                 num = int(mo.group(5))
                 name = (mo.group(6) or f"Chapter {num}").strip()
-            y_approx = page.rect.height * text[:mo.start()].count('\n') / max(text.count('\n'), 1)
+            y_approx = page.rect.height * page_text[:mo.start()].count('\n') / max(page_text.count('\n'), 1)
             found.append((page_idx, y_approx, num, name))
 
     # Deduplicate by (num, name) keeping first occurrence
@@ -196,22 +205,46 @@ def extract(
     # Build boundary list with positions for topic assignment
     boundaries: list[tuple[int, float, int]] = []
     topic_map = {(t.num, t.name): i for i, t in enumerate(all_topics)}
+    # Cache OCR results to avoid running OCR twice per page
+    _ocr_cache: dict[int, str] = {}
+
+    def _page_text(page_idx: int) -> str:
+        if force_ocr and ocr_fn:
+            if page_idx not in _ocr_cache:
+                _ocr_cache[page_idx] = "\n".join(ocr_fn(doc[page_idx]))
+            return _ocr_cache[page_idx]
+        return doc[page_idx].get_text()
 
     for page_idx in range(start_page, end_page + 1):
         page = doc[page_idx]
-        text = page.get_text()
-        for mo in _SECTION_RE.finditer(text):
-            if mo.group(1):
-                num, name = int(mo.group(1)), mo.group(2).strip()
-            elif mo.group(3):
-                num, name = int(mo.group(3)), mo.group(4).strip()
-            else:
-                num = int(mo.group(5))
-                name = (mo.group(6) or f"Chapter {num}").strip()
-            key = (num, name)
-            if key in topic_map:
-                y = page.rect.height * text[:mo.start()].count('\n') / max(text.count('\n'), 1)
-                boundaries.append((page_idx, y, topic_map[key]))
+        if force_ocr and ocr_fn:
+            # Image PDFs: use color rect y-positions (reliable) for boundary placement.
+            # Match the rect to a topic via OCR text searched for 话题N pattern.
+            color_rects = _color_topic_rects(page)
+            if color_rects:
+                page_text = _page_text(page_idx)
+                merged = _merge_rects(color_rects)
+                for m in merged:
+                    mo = re.search(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', page_text)
+                    if mo:
+                        num, name = int(mo.group(1)), mo.group(2)
+                        key = (num, name)
+                        if key in topic_map:
+                            boundaries.append((page_idx, m[1], topic_map[key]))
+        else:
+            text = _page_text(page_idx)
+            for mo in _SECTION_RE.finditer(text):
+                if mo.group(1):
+                    num, name = int(mo.group(1)), mo.group(2).strip()
+                elif mo.group(3):
+                    num, name = int(mo.group(3)), mo.group(4).strip()
+                else:
+                    num = int(mo.group(5))
+                    name = (mo.group(6) or f"Chapter {num}").strip()
+                key = (num, name)
+                if key in topic_map:
+                    y = text[:mo.start()].count('\n') / max(text.count('\n'), 1) * page.rect.height
+                    boundaries.append((page_idx, y, topic_map[key]))
 
     boundaries.sort(key=lambda x: (x[0], x[1]))
 
@@ -226,15 +259,15 @@ def extract(
     for page_idx in range(start_page, end_page + 1):
         page = doc[page_idx]
 
-        if force_ocr and ocr_fn:
-            lines = ocr_fn(page)
-        else:
-            lines = [line.strip() for line in page.get_text().splitlines()]
+        lines = [line.strip() for line in _page_text(page_idx).splitlines()]
 
         for line in lines:
             if not _is_valid_sentence(line):
                 continue
             ti = get_topic_index(page_idx, 100)
+            # Fallback: if boundaries couldn't be built (image PDF), assign to topic 0
+            if ti is None and not boundaries:
+                ti = 0
             if ti is not None:
                 all_topics[ti].sentences.append(line)
 
