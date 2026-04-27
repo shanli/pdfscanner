@@ -145,16 +145,39 @@ def detect_topics(
     return topics
 
 
+def _merge_highlight_rects(rects: list[fitz.Rect]) -> list[list[float]]:
+    """Merge per-character highlight rects into word-level bounding boxes.
+
+    Highlights on custom-font PDFs are drawn one tiny rect per glyph.
+    Rects on the same line with a small x-gap (<= 8 units) are merged
+    into one word rect; larger gaps start a new word.
+    """
+    if not rects:
+        return []
+    s = sorted(rects, key=lambda rc: (rc.y0, rc.x0))
+    groups = [[s[0].x0, s[0].y0, s[0].x1, s[0].y1]]
+    for rc in s[1:]:
+        g = groups[-1]
+        same_line = rc.y0 < g[3] + 4 and rc.y1 > g[1] - 4
+        close_x   = rc.x0 - g[2] <= 20         # merge chars and words in same phrase
+        if same_line and close_x:
+            g[0] = min(g[0], rc.x0); g[1] = min(g[1], rc.y0)
+            g[2] = max(g[2], rc.x1); g[3] = max(g[3], rc.y1)
+        else:
+            groups.append([rc.x0, rc.y0, rc.x1, rc.y1])
+    return groups
+
+
 def _highlight_words_on_page(
     page: fitz.Page,
     ocr_fn=None,
 ) -> list[tuple[float, str]]:
     """Return [(y_pdf, word)] for all light-yellow highlighted spans.
 
-    When ocr_fn is provided (OCR mode), each highlight rect is OCR'd
-    individually to avoid garbled text from custom-font PDFs.
+    Highlight rects are collected, merged into word-level boxes, then
+    either OCR'd (OCR mode) or extracted via get_text (text mode).
     """
-    result = []
+    raw_rects: list[fitz.Rect] = []
     for d in page.get_drawings():
         fill = d.get("fill")
         rect = d.get("rect")
@@ -162,14 +185,19 @@ def _highlight_words_on_page(
             continue
         r, g, b = fill[0], fill[1], fill[2]
         if _HIGHLIGHT_YELL(r, g, b):
-            if ocr_fn is not None:
-                rows = ocr_fn(page, clip=rect)
-                w = " ".join(t for _, t in rows).strip()
-            else:
-                words = page.get_text("words", clip=rect)
-                w = " ".join(x[4] for x in words).strip()
-            if w and len(w) > 1 and re.search(r'[a-zA-Z\u4e00-\u9fff]{2,}', w):
-                result.append((rect.y0, w))
+            raw_rects.append(rect)
+
+    result = []
+    for m in _merge_highlight_rects(raw_rects):
+        word_rect = fitz.Rect(m[0], m[1], m[2], m[3])
+        if ocr_fn is not None:
+            rows = ocr_fn(page, clip=word_rect)
+            w = " ".join(t for _, t in rows).strip()
+        else:
+            words = page.get_text("words", clip=word_rect)
+            w = " ".join(x[4] for x in words).strip()
+        if w and len(w) >= 3 and re.search(r'[a-zA-Z\u4e00-\u9fff]{3,}', w):
+            result.append((word_rect.y0, w))
     return result
 
 

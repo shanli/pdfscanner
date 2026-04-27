@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Generate M4A audio per topic")
     scan.add_argument("--markdown", action="store_true",
                       help="Generate Markdown vocabulary report")
+    scan.add_argument("--enrich", action="store_true",
+                      help="Fill vocabulary table via Claude API (requires ANTHROPIC_API_KEY)")
     scan.add_argument("--output", type=str, default="./output",
                       help="Output directory (default: ./output)")
     scan.add_argument("--voice-en", type=str, default="Samantha",
@@ -105,6 +107,17 @@ def main():
     if args.markdown:
         print("\nGenerating Markdown...")
         from pdfscanner.report import generate as gen_report
-        gen_report(topics, output_dir=args.output)
+        word_info = None
+        if args.enrich:
+            from pdfscanner.enrich import enrich_words
+            all_words = list({w for t in topics for w in t.highlights})
+            if all_words:
+                print(f"Enriching {len(all_words)} vocabulary words via Claude API...")
+                all_sentences = [s for t in topics for s in t.sentences]
+                try:
+                    word_info = enrich_words(all_words, context_sentences=all_sentences)
+                except Exception as e:
+                    print(f"Warning: enrichment failed ({e}), continuing without.", file=sys.stderr)
+        gen_report(topics, output_dir=args.output, word_info=word_info)
 
     print(f"\nDone. Files saved to: {args.output}")

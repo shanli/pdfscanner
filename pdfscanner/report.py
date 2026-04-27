@@ -8,8 +8,12 @@ def generate(
     topics: list[Topic],
     output_dir: str,
     filename: str = "highlights.md",
+    word_info: dict[str, dict[str, str]] | None = None,
 ) -> str:
-    """Render topics to a Markdown file. Returns the output file path."""
+    """Render topics to a Markdown file. Returns the output file path.
+
+    word_info: optional {word: {pos, meaning, usage, example}} from enrich.enrich_words().
+    """
     os.makedirs(output_dir, exist_ok=True)
     lines = ["# PDF Scanner — Highlights Report", ""]
 
@@ -21,7 +25,13 @@ def generate(
             lines += ["| 词汇 | 词性 | 中文释义 | 用法说明 | 搭配例句 |",
                       "|------|------|----------|----------|----------|"]
             for w in sorted(set(t.highlights)):
-                lines.append(f"| **{w}** | — | — | — | — |")
+                info      = (word_info or {}).get(w, {})
+                display   = info.get("corrected", w) if word_info else w
+                pos       = info.get("pos", "") or "—"
+                meaning   = info.get("meaning", "") or "—"
+                usage     = info.get("usage", "") or "—"
+                example   = info.get("example", "") or "—"
+                lines.append(f"| **{display}** | {pos} | {meaning} | {usage} | {example} |")
             lines.append("")
 
         if t.sentences:
