@@ -145,8 +145,15 @@ def detect_topics(
     return topics
 
 
-def _highlight_words_on_page(page: fitz.Page) -> list[tuple[float, str]]:
-    """Return [(y_pdf, word)] for all light-yellow highlighted spans."""
+def _highlight_words_on_page(
+    page: fitz.Page,
+    ocr_fn=None,
+) -> list[tuple[float, str]]:
+    """Return [(y_pdf, word)] for all light-yellow highlighted spans.
+
+    When ocr_fn is provided (OCR mode), each highlight rect is OCR'd
+    individually to avoid garbled text from custom-font PDFs.
+    """
     result = []
     for d in page.get_drawings():
         fill = d.get("fill")
@@ -155,8 +162,12 @@ def _highlight_words_on_page(page: fitz.Page) -> list[tuple[float, str]]:
             continue
         r, g, b = fill[0], fill[1], fill[2]
         if _HIGHLIGHT_YELL(r, g, b):
-            words = page.get_text("words", clip=rect)
-            w = " ".join(x[4] for x in words).strip()
+            if ocr_fn is not None:
+                rows = ocr_fn(page, clip=rect)
+                w = " ".join(t for _, t in rows).strip()
+            else:
+                words = page.get_text("words", clip=rect)
+                w = " ".join(x[4] for x in words).strip()
             if w and len(w) > 1 and re.search(r'[a-zA-Z\u4e00-\u9fff]{2,}', w):
                 result.append((rect.y0, w))
     return result
@@ -284,7 +295,7 @@ def extract(
                 if ti is not None:
                     all_topics[ti].sentences.append(line)
 
-        for y, word in _highlight_words_on_page(page):
+        for y, word in _highlight_words_on_page(page, ocr_fn=ocr_fn if force_ocr else None):
             ti = get_topic_index(page_idx, y)
             if ti is not None and word not in all_topics[ti].highlights:
                 all_topics[ti].highlights.append(word)

@@ -17,10 +17,13 @@ def recognize_page(
     page,  # fitz.Page
     langs: tuple[str, ...] = ("zh-Hans", "en-US"),
     dpi: int = 200,
-) -> list[str]:
+    clip=None,  # fitz.Rect | None — render only this region
+) -> list[tuple[float, str]]:
     """
     Render a fitz.Page to image and run Apple Vision OCR.
-    Returns list of recognized text strings, sorted top-to-bottom.
+    Returns list of (y_pdf, text) tuples sorted top-to-bottom.
+
+    clip: optional fitz.Rect to render only a sub-region of the page.
     """
     _check_macos()
 
@@ -33,8 +36,8 @@ def recognize_page(
             "Install with: pip install pyobjc-framework-Vision"
         ) from e
 
-    # Render page to PNG
-    pix = page.get_pixmap(dpi=dpi)
+    # Render page (or sub-region) to PNG
+    pix = page.get_pixmap(dpi=dpi, clip=clip)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp_path = f.name
     pix.save(tmp_path)
@@ -47,7 +50,15 @@ def recognize_page(
         handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
         handler.performRequests_error_([req], None)
 
-        page_h = page.rect.height
+        # When a clip rect is given, Vision bounding boxes are relative to the
+        # clip region. Map them back to full-page PDF coordinates.
+        if clip is not None:
+            region_h = clip.y1 - clip.y0
+            region_y0 = clip.y0
+        else:
+            region_h = page.rect.height
+            region_y0 = 0.0
+
         rows: list[tuple[float, str]] = []
         for obs in req.results():
             candidates = obs.topCandidates_(1)
@@ -58,7 +69,8 @@ def recognize_page(
                 continue
             bb = obs.boundingBox()
             y_center = bb.origin.y + bb.size.height / 2
-            y_pdf = page_h * (1 - y_center)
+            # Convert Vision normalized coords (origin bottom-left) to PDF y
+            y_pdf = region_y0 + region_h * (1 - y_center)
             rows.append((y_pdf, text))
 
         rows.sort(key=lambda x: x[0])
