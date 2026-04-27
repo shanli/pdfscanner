@@ -95,29 +95,31 @@ def detect_topics(
 
         # Get page text — OCR or direct extraction
         if force_ocr and ocr_fn:
-            page_text = "\n".join(ocr_fn(page))
+            page_text = "\n".join(t for _, t in ocr_fn(page))
         else:
             page_text = page.get_text()
 
         # Strategy 1: color-coded yellow rects (image-based or styled PDFs)
         color_rects = _color_topic_rects(page)
         if color_rects:
-            merged = _merge_rects(color_rects)
-            for m in merged:
-                if force_ocr:
-                    # Image PDF: search full OCR text for topic pattern near this rect
-                    raw = page_text
-                else:
+            merged = sorted(_merge_rects(color_rects), key=lambda m: m[1])  # sort by y
+            if force_ocr:
+                # Match rects to topic headers in order (both sorted top-to-bottom)
+                hits = re.findall(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', page_text)
+                for m, (num_s, name) in zip(merged, hits):
+                    found.append((page_idx, m[1], int(num_s), name))
+            else:
+                for m in merged:
                     clip = fitz.Rect(m[0] - 5, m[1], m[2] + 5, m[3])
                     words = page.get_text("words", clip=clip)
                     raw = " ".join(w[4] for w in words)
-                mo = re.search(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', raw)
-                if mo:
-                    found.append((page_idx, m[1], int(mo.group(1)), mo.group(2)))
-                    continue
-                mo2 = re.search(r'(\d+)\.\s+(.+)', raw)
-                if mo2:
-                    found.append((page_idx, m[1], int(mo2.group(1)), mo2.group(2).strip()))
+                    mo = re.search(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', raw)
+                    if mo:
+                        found.append((page_idx, m[1], int(mo.group(1)), mo.group(2)))
+                        continue
+                    mo2 = re.search(r'(\d+)\.\s+(.+)', raw)
+                    if mo2:
+                        found.append((page_idx, m[1], int(mo2.group(1)), mo2.group(2).strip()))
 
         # Strategy 2: regex on page text (text PDF or OCR output)
         for mo in _SECTION_RE.finditer(page_text):
@@ -206,31 +208,32 @@ def extract(
     boundaries: list[tuple[int, float, int]] = []
     topic_map = {(t.num, t.name): i for i, t in enumerate(all_topics)}
     # Cache OCR results to avoid running OCR twice per page
-    _ocr_cache: dict[int, str] = {}
+    _ocr_cache: dict[int, list[tuple[float, str]]] = {}
+
+    def _page_ocr_rows(page_idx: int) -> list[tuple[float, str]]:
+        if page_idx not in _ocr_cache:
+            _ocr_cache[page_idx] = ocr_fn(doc[page_idx])
+        return _ocr_cache[page_idx]
 
     def _page_text(page_idx: int) -> str:
         if force_ocr and ocr_fn:
-            if page_idx not in _ocr_cache:
-                _ocr_cache[page_idx] = "\n".join(ocr_fn(doc[page_idx]))
-            return _ocr_cache[page_idx]
+            return "\n".join(t for _, t in _page_ocr_rows(page_idx))
         return doc[page_idx].get_text()
 
     for page_idx in range(start_page, end_page + 1):
         page = doc[page_idx]
         if force_ocr and ocr_fn:
             # Image PDFs: use color rect y-positions (reliable) for boundary placement.
-            # Match the rect to a topic via OCR text searched for 话题N pattern.
+            # Match rects to topic headers in order (both sorted top-to-bottom by y).
             color_rects = _color_topic_rects(page)
             if color_rects:
                 page_text = _page_text(page_idx)
-                merged = _merge_rects(color_rects)
-                for m in merged:
-                    mo = re.search(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', page_text)
-                    if mo:
-                        num, name = int(mo.group(1)), mo.group(2)
-                        key = (num, name)
-                        if key in topic_map:
-                            boundaries.append((page_idx, m[1], topic_map[key]))
+                merged = sorted(_merge_rects(color_rects), key=lambda m: m[1])
+                hits = re.findall(r'话题\s*(\d+)\s*([\u4e00-\u9fff]+)', page_text)
+                for m, (num_s, name) in zip(merged, hits):
+                    key = (int(num_s), name)
+                    if key in topic_map:
+                        boundaries.append((page_idx, m[1], topic_map[key]))
         else:
             text = _page_text(page_idx)
             for mo in _SECTION_RE.finditer(text):
@@ -259,17 +262,27 @@ def extract(
     for page_idx in range(start_page, end_page + 1):
         page = doc[page_idx]
 
-        lines = [line.strip() for line in _page_text(page_idx).splitlines()]
-
-        for line in lines:
-            if not _is_valid_sentence(line):
-                continue
-            ti = get_topic_index(page_idx, 100)
-            # Fallback: if boundaries couldn't be built (image PDF), assign to topic 0
-            if ti is None and not boundaries:
-                ti = 0
-            if ti is not None:
-                all_topics[ti].sentences.append(line)
+        if force_ocr and ocr_fn:
+            ocr_rows = _page_ocr_rows(page_idx)
+            for y, text in ocr_rows:
+                line = text.strip()
+                if not _is_valid_sentence(line):
+                    continue
+                ti = get_topic_index(page_idx, y)
+                if ti is None and not boundaries:
+                    ti = 0
+                if ti is not None:
+                    all_topics[ti].sentences.append(line)
+        else:
+            lines = [line.strip() for line in _page_text(page_idx).splitlines()]
+            for line in lines:
+                if not _is_valid_sentence(line):
+                    continue
+                ti = get_topic_index(page_idx, 100)
+                if ti is None and not boundaries:
+                    ti = 0
+                if ti is not None:
+                    all_topics[ti].sentences.append(line)
 
         for y, word in _highlight_words_on_page(page):
             ti = get_topic_index(page_idx, y)

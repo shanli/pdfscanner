@@ -62,6 +62,6 @@ def recognize_page(
             rows.append((y_pdf, text))
 
         rows.sort(key=lambda x: x[0])
-        return [t for _, t in rows]
+        return rows  # list of (y_pdf, text) tuples
     finally:
         os.unlink(tmp_path)
