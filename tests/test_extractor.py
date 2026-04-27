@@ -30,3 +30,22 @@ def test_is_text_based_true(text_pdf):
     doc = open_pdf(text_pdf)
     assert is_text_based(doc) is True
     doc.close()
+
+from pdfscanner.extractor import detect_topics
+
+def test_detect_topics_by_number(text_pdf):
+    doc = open_pdf(text_pdf)
+    topics = detect_topics(doc, start_page=0, end_page=0)
+    doc.close()
+    assert len(topics) == 2
+    nums = [t.num for t in topics]
+    assert 1 in nums
+    assert 2 in nums
+
+def test_detect_topics_names(text_pdf):
+    doc = open_pdf(text_pdf)
+    topics = detect_topics(doc, start_page=0, end_page=0)
+    doc.close()
+    names = [t.name for t in topics]
+    assert "Advertising" in names
+    assert "Animal Rights" in names
